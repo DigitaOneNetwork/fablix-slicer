@@ -106,7 +106,9 @@ app.post("/api/slice", upload.single("stl"), async (req, res) => {
     return res.status(500).json({ error: "ORCA_CLI_PATH ist nicht konfiguriert." });
   }
 
-  const stlPath = path.resolve(req.file.path);
+  // Datei mit .stl Extension umbenennen, damit OrcaSlicer das Format erkennt
+  const stlPath = path.resolve(req.file.path) + ".stl";
+  await fs.rename(req.file.path, stlPath);
   const material = req.body.material ?? "pla";
   const quality  = req.body.quality  ?? "standard";
   const jobId    = `job_${Date.now()}`;
