@@ -62,14 +62,18 @@ function getProcessProfile(quality) {
 // Parst Druckzeit aus G-Code-Kommentar:
 // "; estimated printing time (normal mode) = 1h 2m 30s"
 function parsePrintTimeSeconds(gcode) {
-  const match = gcode.match(/;\s*estimated printing time \(normal mode\)\s*=\s*(.*)/i);
+  const match =
+    gcode.match(/;\s*estimated printing time \(normal mode\)\s*=\s*(.*)/i) ??
+    gcode.match(/;\s*total estimated time:\s*(.*)/i);
   if (!match) return null;
 
   const timeStr = match[1].trim();
   let seconds = 0;
+  const d = timeStr.match(/(\d+)d/);
   const h = timeStr.match(/(\d+)h/);
   const m = timeStr.match(/(\d+)m/);
   const s = timeStr.match(/(\d+)s/);
+  if (d) seconds += parseInt(d[1]) * 86400;
   if (h) seconds += parseInt(h[1]) * 3600;
   if (m) seconds += parseInt(m[1]) * 60;
   if (s) seconds += parseInt(s[1]);
@@ -77,9 +81,9 @@ function parsePrintTimeSeconds(gcode) {
 }
 
 // Parst Filamentgewicht aus G-Code-Kommentar:
-// "; total filament used [g] = 42.50"
+// "; filament used [g] = 42.50" oder "; total filament used [g] = 42.50"
 function parseFilamentGrams(gcode) {
-  const match = gcode.match(/;\s*total filament used \[g\]\s*=\s*([\d.]+)/i);
+  const match = gcode.match(/;\s*(?:total\s+)?filament used \[g\]\s*=\s*([\d.]+)/i);
   return match ? parseFloat(match[1]) : null;
 }
 
@@ -88,13 +92,42 @@ function extractGcodeFromThreeMF(threeMFPath) {
   const zip = new AdmZip(threeMFPath);
   const entries = zip.getEntries();
 
-  // Suche nach der Gcode-Datei im Metadata-Ordner
-  const gcodeEntry = entries.find(
-    (e) => e.entryName.startsWith("Metadata/") && e.entryName.endsWith(".gcode")
-  );
+  const gcodeEntry = entries.find((e) => e.entryName.endsWith(".gcode"));
 
   if (!gcodeEntry) throw new Error("Kein G-Code in 3MF-Datei gefunden.");
   return zip.readAsText(gcodeEntry);
+}
+
+async function readGeneratedGcode(jobOutputDir) {
+  const outFiles = await fs.readdir(jobOutputDir);
+  const gcodeFile = outFiles.find((f) => f.toLowerCase().endsWith(".gcode"));
+
+  if (gcodeFile) {
+    return {
+      gcode: await fs.readFile(path.join(jobOutputDir, gcodeFile), "utf8"),
+      outFiles,
+    };
+  }
+
+  const threeMFFile = outFiles.find((f) => f.toLowerCase().endsWith(".3mf"));
+
+  if (threeMFFile) {
+    return {
+      gcode: extractGcodeFromThreeMF(path.join(jobOutputDir, threeMFFile)),
+      outFiles,
+    };
+  }
+
+  let resultJson = "";
+  try {
+    resultJson = await fs.readFile(path.join(jobOutputDir, "result.json"), "utf8");
+  } catch (_) {}
+
+  const fileList = outFiles.length ? outFiles.join(", ") : "keine";
+  throw new Error(
+    `OrcaSlicer hat keine G-Code-Datei erzeugt. Ausgabedateien: ${fileList}` +
+      (resultJson ? `. result.json: ${resultJson}` : "")
+  );
 }
 
 app.post(["/api/slice", "/slice"], upload.single("stl"), async (req, res) => {
@@ -153,25 +186,22 @@ app.post(["/api/slice", "/slice"], upload.single("stl"), async (req, res) => {
         "--slice", "0",
         "--load-settings", `${machineProfPath};${patchedProcPath}`,
         "--load-filaments", filamentProfPath,
+        "--allow-newer-file",
         "--outputdir", jobOutputDir,
         stlPath,
       ],
       { env, timeout: 120_000 }
     );
 
-    // Finde die erzeugte .gcode.3mf Datei
-    const outFiles = await fs.readdir(jobOutputDir);
-    const threeMFFile = outFiles.find((f) => f.endsWith(".gcode.3mf"));
-    if (!threeMFFile) throw new Error("OrcaSlicer hat keine .gcode.3mf-Datei erzeugt.");
-
-    const threeMFPath = path.join(jobOutputDir, threeMFFile);
-    const gcode = extractGcodeFromThreeMF(threeMFPath);
+    const { gcode, outFiles } = await readGeneratedGcode(jobOutputDir);
 
     const printTimeSeconds = parsePrintTimeSeconds(gcode);
     const filamentGrams    = parseFilamentGrams(gcode);
 
     if (printTimeSeconds === null || filamentGrams === null) {
-      throw new Error("Konnte Druckzeit oder Filamentgewicht aus G-Code nicht lesen.");
+      throw new Error(
+        `Konnte Druckzeit oder Filamentgewicht aus G-Code nicht lesen. Ausgabedateien: ${outFiles.join(", ")}`
+      );
     }
 
     console.log(`[SLICER] Ergebnis: ${filamentGrams}g, ${Math.round(printTimeSeconds / 60)} min`);
