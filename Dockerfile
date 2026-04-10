@@ -1,5 +1,8 @@
 FROM ghcr.io/afkfelix/orca-slicer-api:v0.3.0-orca2.3.1-amd64
 
+# xvfb-run installieren (für headless OrcaSlicer)
+RUN apt-get update && apt-get install -y xvfb && rm -rf /var/lib/apt/lists/*
+
 # Node.js Service-Code installieren
 WORKDIR /service
 COPY package*.json ./
