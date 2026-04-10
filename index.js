@@ -24,6 +24,7 @@ const ORCA_BIN = process.env.ORCA_CLI_PATH;
 const PROFILES_BASE = process.env.ORCA_PROFILES_PATH;
 const BUILD_COMMIT = process.env.SLICER_BUILD_COMMIT ?? "unknown";
 const BUILD_DATE = process.env.SLICER_BUILD_DATE ?? "unknown";
+const BUILD_VOLUME_MM = { x: 256, y: 256, z: 256 };
 
 // Liest LOCALE_ARCHIVE aus Env, oder sucht mit kurzem Timeout
 function findLocaleArchive() {
@@ -59,6 +60,134 @@ function getProcessProfile(quality) {
   return quality === "fine"
     ? "0.20mm Standard @BBL X1C"
     : "0.28mm Extra Draft @BBL X1C";
+}
+
+function createEmptyBounds() {
+  return {
+    minX: Infinity,
+    maxX: -Infinity,
+    minY: Infinity,
+    maxY: -Infinity,
+    minZ: Infinity,
+    maxZ: -Infinity,
+    vertices: 0,
+  };
+}
+
+function includeVertex(bounds, x, y, z) {
+  bounds.minX = Math.min(bounds.minX, x);
+  bounds.maxX = Math.max(bounds.maxX, x);
+  bounds.minY = Math.min(bounds.minY, y);
+  bounds.maxY = Math.max(bounds.maxY, y);
+  bounds.minZ = Math.min(bounds.minZ, z);
+  bounds.maxZ = Math.max(bounds.maxZ, z);
+  bounds.vertices += 1;
+}
+
+function getBoundsSize(bounds) {
+  return {
+    x: bounds.maxX - bounds.minX,
+    y: bounds.maxY - bounds.minY,
+    z: bounds.maxZ - bounds.minZ,
+  };
+}
+
+function formatMm(value) {
+  return Number.isFinite(value) ? `${value.toFixed(2)}mm` : "unbekannt";
+}
+
+function assertStlFitsBuildVolume(bounds) {
+  const size = getBoundsSize(bounds);
+  if (size.x > BUILD_VOLUME_MM.x || size.y > BUILD_VOLUME_MM.y || size.z > BUILD_VOLUME_MM.z) {
+    throw new Error(
+      `Modell passt nicht in den Bauraum des Bambu X1C (${BUILD_VOLUME_MM.x} x ${BUILD_VOLUME_MM.y} x ${BUILD_VOLUME_MM.z}mm). ` +
+        `Modellgroesse: ${formatMm(size.x)} x ${formatMm(size.y)} x ${formatMm(size.z)}.`
+    );
+  }
+}
+
+function getPlacementOffset(bounds) {
+  return {
+    x: BUILD_VOLUME_MM.x / 2 - (bounds.minX + bounds.maxX) / 2,
+    y: BUILD_VOLUME_MM.y / 2 - (bounds.minY + bounds.maxY) / 2,
+    z: -bounds.minZ,
+  };
+}
+
+function isBinaryStl(buffer) {
+  if (buffer.length < 84) return false;
+  const triangleCount = buffer.readUInt32LE(80);
+  const expectedLength = 84 + triangleCount * 50;
+  return triangleCount > 0 && expectedLength <= buffer.length;
+}
+
+function normalizeBinaryStl(buffer) {
+  const triangleCount = buffer.readUInt32LE(80);
+  const bounds = createEmptyBounds();
+
+  for (let i = 0; i < triangleCount; i += 1) {
+    const triangleOffset = 84 + i * 50;
+    for (let vertexIndex = 0; vertexIndex < 3; vertexIndex += 1) {
+      const vertexOffset = triangleOffset + 12 + vertexIndex * 12;
+      includeVertex(
+        bounds,
+        buffer.readFloatLE(vertexOffset),
+        buffer.readFloatLE(vertexOffset + 4),
+        buffer.readFloatLE(vertexOffset + 8)
+      );
+    }
+  }
+
+  if (!bounds.vertices) throw new Error("STL-Datei enthaelt keine Dreiecke.");
+  assertStlFitsBuildVolume(bounds);
+
+  const offset = getPlacementOffset(bounds);
+  for (let i = 0; i < triangleCount; i += 1) {
+    const triangleOffset = 84 + i * 50;
+    for (let vertexIndex = 0; vertexIndex < 3; vertexIndex += 1) {
+      const vertexOffset = triangleOffset + 12 + vertexIndex * 12;
+      buffer.writeFloatLE(buffer.readFloatLE(vertexOffset) + offset.x, vertexOffset);
+      buffer.writeFloatLE(buffer.readFloatLE(vertexOffset + 4) + offset.y, vertexOffset + 4);
+      buffer.writeFloatLE(buffer.readFloatLE(vertexOffset + 8) + offset.z, vertexOffset + 8);
+    }
+  }
+
+  return { bounds, offset };
+}
+
+function normalizeAsciiStl(text) {
+  const vertexPattern = /(vertex\s+)([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)/g;
+  const bounds = createEmptyBounds();
+
+  for (const match of text.matchAll(vertexPattern)) {
+    includeVertex(bounds, Number.parseFloat(match[2]), Number.parseFloat(match[3]), Number.parseFloat(match[4]));
+  }
+
+  if (!bounds.vertices) throw new Error("STL-Datei enthaelt keine lesbaren Vertex-Daten.");
+  assertStlFitsBuildVolume(bounds);
+
+  const offset = getPlacementOffset(bounds);
+  const normalizedText = text.replace(vertexPattern, (_match, prefix, x, y, z) => {
+    return `${prefix}${Number.parseFloat(x) + offset.x} ${Number.parseFloat(y) + offset.y} ${Number.parseFloat(z) + offset.z}`;
+  });
+
+  return { text: normalizedText, bounds, offset };
+}
+
+async function normalizeStlPlacement(stlPath) {
+  const buffer = await fs.readFile(stlPath);
+
+  if (isBinaryStl(buffer)) {
+    const normalizedBuffer = Buffer.from(buffer);
+    const normalized = normalizeBinaryStl(normalizedBuffer);
+    await fs.writeFile(stlPath, normalizedBuffer);
+    return { ...normalized, format: "binary" };
+  }
+
+  const text = buffer.toString("utf8");
+  const normalized = normalizeAsciiStl(text);
+  await fs.writeFile(stlPath, normalized.text, "utf8");
+  return { bounds: normalized.bounds, offset: normalized.offset, format: "ascii" };
 }
 
 function parseDurationSeconds(timeStr) {
@@ -259,6 +388,14 @@ app.post(["/api/slice", "/slice"], upload.single("stl"), async (req, res) => {
   try {
     await fs.mkdir(UPLOADS_DIR, { recursive: true });
     await fs.mkdir(jobOutputDir, { recursive: true });
+
+    const placement = await normalizeStlPlacement(stlPath);
+    const size = getBoundsSize(placement.bounds);
+    console.log(
+      `[SLICER] STL normalisiert (${placement.format}): ` +
+        `${formatMm(size.x)} x ${formatMm(size.y)} x ${formatMm(size.z)}, ` +
+        `Offset X${placement.offset.x.toFixed(2)} Y${placement.offset.y.toFixed(2)} Z${placement.offset.z.toFixed(2)}`
+    );
 
     const machineProfPath = path.join(PROFILES_BASE, "machine", "Bambu Lab X1 Carbon 0.4 nozzle.json");
     const processProfName = getProcessProfile(quality);
