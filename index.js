@@ -61,15 +61,7 @@ function getProcessProfile(quality) {
     : "0.28mm Extra Draft @BBL X1C";
 }
 
-// Parst Druckzeit aus G-Code-Kommentar:
-// "; estimated printing time (normal mode) = 1h 2m 30s"
-function parsePrintTimeSeconds(gcode) {
-  const match =
-    gcode.match(/;\s*estimated printing time \(normal mode\)\s*=\s*(.*)/i) ??
-    gcode.match(/;\s*total estimated time:\s*(.*)/i);
-  if (!match) return null;
-
-  const timeStr = match[1].trim();
+function parseDurationSeconds(timeStr) {
   let seconds = 0;
   const d = timeStr.match(/(\d+)d/);
   const h = timeStr.match(/(\d+)h/);
@@ -82,19 +74,124 @@ function parsePrintTimeSeconds(gcode) {
   return seconds > 0 ? seconds : null;
 }
 
-// Parst Filamentgewicht aus G-Code-Kommentar:
-// "; filament used [g] = 42.50" oder "; total filament used [g] = 42.50"
-function parseFilamentGrams(gcode) {
+function parseNumber(value) {
+  return Number.parseFloat(value.replace(",", "."));
+}
+
+function getMaterialDensity(material) {
+  const map = {
+    pla: 1.24,
+    petg: 1.27,
+    abs: 1.04,
+    tpu: 1.21,
+    "pla-cf": 1.3,
+    "petg-cf": 1.35,
+  };
+  return map[material?.toLowerCase()] ?? map.pla;
+}
+
+function getFilamentDensity(gcode, material) {
+  const match = gcode.match(/;\s*filament_density\s*[:=]\s*([\d.,]+)/i);
+  const density = match ? parseNumber(match[1]) : 0;
+  return density > 0 ? density : getMaterialDensity(material);
+}
+
+function getFilamentDiameter(gcode) {
+  const match = gcode.match(/;\s*filament_diameter\s*[:=]\s*([\d.,]+)/i);
+  const diameter = match ? parseNumber(match[1]) : 0;
+  return diameter > 0 ? diameter : 1.75;
+}
+
+function lengthMmToGrams(lengthMm, diameterMm, densityGcm3) {
+  const volumeCm3 = (lengthMm * Math.PI * (diameterMm / 2) ** 2) / 1000;
+  return volumeCm3 * densityGcm3;
+}
+
+// Parst Druckzeit aus G-Code-Kommentar.
+function parsePrintTimeSeconds(gcode) {
   const match =
-    gcode.match(/;\s*(?:total\s+)?filament\s+used\s*\[g\]\s*[:=]\s*([\d.]+)/i) ??
-    gcode.match(/;\s*(?:total\s+)?filament\s+weight\s*\[g\]\s*[:=]\s*([\d.]+)/i);
-  return match ? parseFloat(match[1]) : null;
+    gcode.match(/;\s*total estimated time\s*[:=]\s*([^;\r\n]+)/i) ??
+    gcode.match(/;\s*estimated printing time \(normal mode\)\s*[:=]\s*([^;\r\n]+)/i) ??
+    gcode.match(/;\s*model printing time\s*[:=]\s*([^;\r\n]+)/i);
+  return match ? parseDurationSeconds(match[1].trim()) : null;
+}
+
+function estimateFilamentGramsFromExtrusion(gcode, material) {
+  const density = getFilamentDensity(gcode, material);
+  const diameter = getFilamentDiameter(gcode);
+  let relativeExtrusion = false;
+  let currentE = 0;
+  let lengthMm = 0;
+
+  for (const rawLine of gcode.split(/\r?\n/)) {
+    const line = rawLine.split(";")[0].trim();
+    if (!line) continue;
+
+    if (/^M82\b/i.test(line)) {
+      relativeExtrusion = false;
+      continue;
+    }
+    if (/^M83\b/i.test(line)) {
+      relativeExtrusion = true;
+      continue;
+    }
+
+    const eMatch = line.match(/\bE(-?\d+(?:[.,]\d+)?)/i);
+    if (!eMatch) continue;
+
+    const eValue = parseNumber(eMatch[1]);
+    if (/^G92\b/i.test(line)) {
+      currentE = eValue;
+      continue;
+    }
+    if (!/^G[01]\b/i.test(line)) continue;
+
+    if (relativeExtrusion) {
+      if (eValue > 0) lengthMm += eValue;
+    } else {
+      const delta = eValue - currentE;
+      if (delta > 0) lengthMm += delta;
+      currentE = eValue;
+    }
+  }
+
+  return lengthMm > 0 ? lengthMmToGrams(lengthMm, diameter, density) : null;
+}
+
+// Parst Filamentgewicht aus G-Code-Kommentar oder berechnet es aus Volumen/Laenge.
+function parseFilamentGrams(gcode, material) {
+  const match =
+    gcode.match(/;\s*(?:total\s+)?filament\s+used\s*\[g\]\s*[:=]\s*([\d.,]+)/i) ??
+    gcode.match(/;\s*(?:total\s+)?filament\s+weight\s*\[g\]\s*[:=]\s*([\d.,]+)/i);
+  if (match) return parseNumber(match[1]);
+
+  const density = getFilamentDensity(gcode, material);
+  const volumeMatch =
+    gcode.match(/;\s*(?:total\s+)?filament\s+used\s*\[cm3\]\s*[:=]\s*([\d.,]+)/i) ??
+    gcode.match(/;\s*(?:total\s+)?filament\s+volume\s*\[cm3\]\s*[:=]\s*([\d.,]+)/i);
+  if (volumeMatch) return parseNumber(volumeMatch[1]) * density;
+
+  const diameter = getFilamentDiameter(gcode);
+  const lengthMmMatch =
+    gcode.match(/;\s*(?:total\s+)?filament\s+(?:used|length)\s*\[mm\]\s*[:=]\s*([\d.,]+)/i) ??
+    gcode.match(/;\s*(?:total\s+)?filament\s+used\s*[:=]\s*([\d.,]+)\s*mm/i);
+  if (lengthMmMatch) return lengthMmToGrams(parseNumber(lengthMmMatch[1]), diameter, density);
+
+  const lengthMMatch =
+    gcode.match(/;\s*(?:total\s+)?filament\s+(?:used|length)\s*\[m\]\s*[:=]\s*([\d.,]+)/i) ??
+    gcode.match(/;\s*(?:total\s+)?filament\s+used\s*[:=]\s*([\d.,]+)\s*m/i);
+  if (lengthMMatch) return lengthMmToGrams(parseNumber(lengthMMatch[1]) * 1000, diameter, density);
+
+  return estimateFilamentGramsFromExtrusion(gcode, material);
 }
 
 function getMetadataDebugLines(gcode) {
   return gcode
     .split(/\r?\n/)
-    .filter((line) => /filament|estimated|time|weight|used/i.test(line))
+    .filter((line) => {
+      return /;\s*(model printing time|total estimated time|estimated printing time|filament_(density|diameter)|(?:total\s+)?filament\s+(used|weight|volume|length))/i.test(line);
+    })
+    .map((line) => line.slice(0, 300))
     .slice(0, 80)
     .join("\n");
 }
@@ -208,7 +305,7 @@ app.post(["/api/slice", "/slice"], upload.single("stl"), async (req, res) => {
     const { gcode, outFiles } = await readGeneratedGcode(jobOutputDir);
 
     const printTimeSeconds = parsePrintTimeSeconds(gcode);
-    const filamentGrams    = parseFilamentGrams(gcode);
+    const filamentGrams    = parseFilamentGrams(gcode, material);
 
     if (printTimeSeconds === null || filamentGrams === null) {
       const metadataDebug = getMetadataDebugLines(gcode);
@@ -234,7 +331,7 @@ app.post(["/api/slice", "/slice"], upload.single("stl"), async (req, res) => {
     if (stdout) console.error(`[SLICER] stdout:`, stdout);
     res.status(500).json({ error: "Slicing fehlgeschlagen.", details: error.message, stderr, stdout });
   } finally {
-    // Aufräumen
+    // Aufraeumen
     try { await fs.unlink(stlPath); } catch (_) {}
     try { await fs.rm(jobOutputDir, { recursive: true, force: true }); } catch (_) {}
   }
