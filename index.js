@@ -83,8 +83,18 @@ function parsePrintTimeSeconds(gcode) {
 // Parst Filamentgewicht aus G-Code-Kommentar:
 // "; filament used [g] = 42.50" oder "; total filament used [g] = 42.50"
 function parseFilamentGrams(gcode) {
-  const match = gcode.match(/;\s*(?:total\s+)?filament used \[g\]\s*=\s*([\d.]+)/i);
+  const match =
+    gcode.match(/;\s*(?:total\s+)?filament\s+used\s*\[g\]\s*[:=]\s*([\d.]+)/i) ??
+    gcode.match(/;\s*(?:total\s+)?filament\s+weight\s*\[g\]\s*[:=]\s*([\d.]+)/i);
   return match ? parseFloat(match[1]) : null;
+}
+
+function getMetadataDebugLines(gcode) {
+  return gcode
+    .split(/\r?\n/)
+    .filter((line) => /filament|estimated|time|weight|used/i.test(line))
+    .slice(0, 80)
+    .join("\n");
 }
 
 // Extrahiert G-Code-Text aus einer .gcode.3mf Datei (ZIP)
@@ -199,8 +209,10 @@ app.post(["/api/slice", "/slice"], upload.single("stl"), async (req, res) => {
     const filamentGrams    = parseFilamentGrams(gcode);
 
     if (printTimeSeconds === null || filamentGrams === null) {
+      const metadataDebug = getMetadataDebugLines(gcode);
       throw new Error(
-        `Konnte Druckzeit oder Filamentgewicht aus G-Code nicht lesen. Ausgabedateien: ${outFiles.join(", ")}`
+        `Konnte Druckzeit oder Filamentgewicht aus G-Code nicht lesen. Ausgabedateien: ${outFiles.join(", ")}` +
+          (metadataDebug ? `. Metadata-Zeilen: ${metadataDebug}` : "")
       );
     }
 
