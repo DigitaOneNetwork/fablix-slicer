@@ -124,6 +124,12 @@ app.post("/api/slice", upload.single("stl"), async (req, res) => {
     const filamentProfName = getFilamentProfile(material);
     const filamentProfPath = path.join(PROFILES_BASE, "filament", `${filamentProfName}.json`);
 
+    // Override-Profil: deaktiviert relative E-Adressierung (verhindert exit code -51)
+    const overrideProfPath = path.join(jobOutputDir, "override.json");
+    await fs.writeFile(overrideProfPath, JSON.stringify({
+      use_relative_e_distances: "0",
+    }));
+
     console.log(`[SLICER] Job ${jobId}: ${req.file.originalname}`);
     console.log(`[SLICER] Drucker:   Bambu Lab X1 Carbon 0.4 nozzle`);
     console.log(`[SLICER] Prozess:   ${processProfName}`);
@@ -144,7 +150,7 @@ app.post("/api/slice", upload.single("stl"), async (req, res) => {
         "-a",
         ORCA_BIN,
         "--slice", "0",
-        "--load-settings", `${machineProfPath};${processProfPath}`,
+        "--load-settings", `${machineProfPath};${processProfPath};${overrideProfPath}`,
         "--load-filaments", filamentProfPath,
         "--outputdir", jobOutputDir,
         stlPath,
