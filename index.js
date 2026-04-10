@@ -436,6 +436,48 @@ function getProfilePath(kind, profileName) {
   return path.join(PROFILES_BASE, kind, `${profileName}.json`);
 }
 
+function removeUnsupportedH2sGcodeBlock(gcode) {
+  const lines = gcode.split("\n");
+  const patched = [];
+  let skipping = false;
+  let ifDepth = 0;
+
+  for (const line of lines) {
+    if (!skipping && line.includes("{if (min_vitrification_temperature <= 50)}")) {
+      skipping = true;
+      ifDepth = 1;
+      patched.push("    ; H2S chamber autocooling block removed for Orca CLI 2.3.1 compatibility");
+      patched.push("    M142 P1 R30 S40 T45 U0.3 V0.5 W0.8 O45 ; set chamber autocooling");
+      continue;
+    }
+
+    if (skipping) {
+      if (line.includes("{if ")) ifDepth += 1;
+      if (line.includes("{endif}")) ifDepth -= 1;
+      if (ifDepth <= 0) skipping = false;
+      continue;
+    }
+
+    patched.push(line);
+  }
+
+  return patched.join("\n");
+}
+
+async function createPatchedMachineProfile(machineProfPath, printer, jobOutputDir) {
+  if (printer.id !== "h2s") return machineProfPath;
+
+  const patchedMachinePath = path.join(jobOutputDir, "machine_patched.json");
+  const machineRaw = JSON.parse(await fs.readFile(machineProfPath, "utf8"));
+
+  if (typeof machineRaw.machine_start_gcode === "string") {
+    machineRaw.machine_start_gcode = removeUnsupportedH2sGcodeBlock(machineRaw.machine_start_gcode);
+  }
+
+  await fs.writeFile(patchedMachinePath, JSON.stringify(machineRaw));
+  return patchedMachinePath;
+}
+
 async function ensureProfileExists(profilePath, label) {
   try {
     await fs.access(profilePath);
@@ -492,6 +534,7 @@ app.post(["/api/slice", "/slice"], upload.single("stl"), async (req, res) => {
     await ensureProfileExists(machineProfPath, `Druckerprofil '${printer.machineProfile}'`);
     await ensureProfileExists(processProfPath, `Prozessprofil '${processProfName}'`);
     await ensureProfileExists(filamentProfPath, `Filamentprofil '${filamentProfName}'`);
+    const patchedMachineProfPath = await createPatchedMachineProfile(machineProfPath, printer, jobOutputDir);
 
     // Patched Prozess-Profil: liest Originaldatei und setzt use_relative_e_distances=0
     // (verhindert OrcaSlicer exit code -51 durch fdm_machine_common Basis-Profil)
@@ -520,7 +563,7 @@ app.post(["/api/slice", "/slice"], upload.single("stl"), async (req, res) => {
         "-a",
         ORCA_BIN,
         "--slice", "0",
-        "--load-settings", `${machineProfPath};${patchedProcPath}`,
+        "--load-settings", `${patchedMachineProfPath};${patchedProcPath}`,
         "--load-filaments", filamentProfPath,
         "--allow-newer-file",
         "--outputdir", jobOutputDir,
