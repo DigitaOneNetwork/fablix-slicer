@@ -27,4 +27,9 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/digitaonenetwork/fablix-slicer:latest
+          tags: |
+            ghcr.io/digitaonenetwork/fablix-slicer:latest
+            ghcr.io/digitaonenetwork/fablix-slicer:sha-${{ github.sha }}
+          build-args: |
+            SLICER_BUILD_COMMIT=${{ github.sha }}
+            SLICER_BUILD_DATE=${{ github.event.head_commit.timestamp }}

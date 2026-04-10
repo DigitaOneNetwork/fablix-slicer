@@ -1,6 +1,7 @@
 services:
   slicer:
     image: ghcr.io/digitaonenetwork/fablix-slicer:latest
+    pull_policy: always
     ports:
       - "3002:3000"
     restart: unless-stopped

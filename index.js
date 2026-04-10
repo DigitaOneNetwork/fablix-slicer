@@ -22,6 +22,8 @@ const upload = multer({ dest: UPLOADS_DIR });
 
 const ORCA_BIN = process.env.ORCA_CLI_PATH;
 const PROFILES_BASE = process.env.ORCA_PROFILES_PATH;
+const BUILD_COMMIT = process.env.SLICER_BUILD_COMMIT ?? "unknown";
+const BUILD_DATE = process.env.SLICER_BUILD_DATE ?? "unknown";
 
 // Liest LOCALE_ARCHIVE aus Env, oder sucht mit kurzem Timeout
 function findLocaleArchive() {
@@ -238,11 +240,15 @@ app.post(["/api/slice", "/slice"], upload.single("stl"), async (req, res) => {
   }
 });
 
-app.get(["/", "/health"], (_req, res) => {
+app.get(["/", "/health", "/version"], (_req, res) => {
   res.json({
     status: "ok",
     method: "orca-slicer-cli",
     orca: ORCA_BIN ?? "nicht konfiguriert",
+    build: {
+      commit: BUILD_COMMIT,
+      date: BUILD_DATE,
+    },
   });
 });
 
