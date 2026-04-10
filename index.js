@@ -137,16 +137,12 @@ app.post("/api/slice", upload.single("stl"), async (req, res) => {
 
     const xvfbRun = process.env.XVFB_RUN ?? "xvfb-run";
 
-    // Datadir = OrcaSlicer Ressourcen-Ordner, damit Profil-Vererbung aufgelöst wird
-    const orcaResourcesDir = path.dirname(path.dirname(PROFILES_BASE)); // .../resources
-
     // OrcaSlicer CLI via xvfb-run (headless)
     await execFileAsync(
       xvfbRun,
       [
         "-a",
         ORCA_BIN,
-        "--datadir", orcaResourcesDir,
         "--slice", "0",
         "--load-settings", `${machineProfPath};${processProfPath}`,
         "--load-filaments", filamentProfPath,
