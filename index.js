@@ -97,7 +97,7 @@ function extractGcodeFromThreeMF(threeMFPath) {
   return zip.readAsText(gcodeEntry);
 }
 
-app.post("/api/slice", upload.single("stl"), async (req, res) => {
+app.post(["/api/slice", "/slice"], upload.single("stl"), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: "Keine STL-Datei hochgeladen." });
   }
@@ -196,7 +196,7 @@ app.post("/api/slice", upload.single("stl"), async (req, res) => {
   }
 });
 
-app.get("/health", (_req, res) => {
+app.get(["/", "/health"], (_req, res) => {
   res.json({
     status: "ok",
     method: "orca-slicer-cli",

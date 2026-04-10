@@ -1,0 +1,7 @@
+services:
+  slicer:
+    image: ghcr.io/digitaonenetwork/fablix-slicer:latest
+    ports:
+      - "3002:3000"
+    restart: unless-stopped
+    shm_size: "256mb"
