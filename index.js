@@ -23,13 +23,15 @@ const upload = multer({ dest: UPLOADS_DIR });
 const ORCA_BIN = process.env.ORCA_CLI_PATH;
 const PROFILES_BASE = process.env.ORCA_PROFILES_PATH;
 
-// Findet das glibc-locales Verzeichnis im Nix-Store zur Laufzeit
+// Liest LOCALE_ARCHIVE aus Env, oder sucht mit kurzem Timeout
 function findLocaleArchive() {
+  if (process.env.LOCALE_ARCHIVE) return process.env.LOCALE_ARCHIVE;
   try {
     const result = execSync(
-      "find /nix/store -maxdepth 1 -name '*glibc-locales*' -not -name '*.drv' 2>/dev/null | head -1"
+      "find /nix/store -maxdepth 2 -name 'locale-archive' 2>/dev/null | head -1",
+      { timeout: 5000 }
     ).toString().trim();
-    if (result) return path.join(result, "lib/locale/locale-archive");
+    return result || null;
   } catch (_) {}
   return null;
 }
@@ -176,8 +178,12 @@ app.post("/api/slice", upload.single("stl"), async (req, res) => {
     });
 
   } catch (error) {
-    console.error(`[SLICER] Fehler:`, error);
-    res.status(500).json({ error: "Slicing fehlgeschlagen.", details: error.message });
+    const stderr = error.stderr?.toString?.() ?? "";
+    const stdout = error.stdout?.toString?.() ?? "";
+    console.error(`[SLICER] Fehler:`, error.message);
+    if (stderr) console.error(`[SLICER] stderr:`, stderr);
+    if (stdout) console.error(`[SLICER] stdout:`, stdout);
+    res.status(500).json({ error: "Slicing fehlgeschlagen.", details: error.message, stderr, stdout });
   } finally {
     // Aufräumen
     try { await fs.unlink(stlPath); } catch (_) {}
