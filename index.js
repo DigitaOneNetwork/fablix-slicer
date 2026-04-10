@@ -124,11 +124,12 @@ app.post("/api/slice", upload.single("stl"), async (req, res) => {
     const filamentProfName = getFilamentProfile(material);
     const filamentProfPath = path.join(PROFILES_BASE, "filament", `${filamentProfName}.json`);
 
-    // Override-Profil: deaktiviert relative E-Adressierung (verhindert exit code -51)
-    const overrideProfPath = path.join(jobOutputDir, "override.json");
-    await fs.writeFile(overrideProfPath, JSON.stringify({
-      use_relative_e_distances: "0",
-    }));
+    // Patched Prozess-Profil: liest Originaldatei und setzt use_relative_e_distances=0
+    // (verhindert OrcaSlicer exit code -51 durch fdm_machine_common Basis-Profil)
+    const patchedProcPath = path.join(jobOutputDir, "process_patched.json");
+    const procRaw = JSON.parse(await fs.readFile(processProfPath, "utf8"));
+    procRaw.use_relative_e_distances = "0";
+    await fs.writeFile(patchedProcPath, JSON.stringify(procRaw));
 
     console.log(`[SLICER] Job ${jobId}: ${req.file.originalname}`);
     console.log(`[SLICER] Drucker:   Bambu Lab X1 Carbon 0.4 nozzle`);
@@ -150,7 +151,7 @@ app.post("/api/slice", upload.single("stl"), async (req, res) => {
         "-a",
         ORCA_BIN,
         "--slice", "0",
-        "--load-settings", `${machineProfPath};${processProfPath};${overrideProfPath}`,
+        "--load-settings", `${machineProfPath};${patchedProcPath}`,
         "--load-filaments", filamentProfPath,
         "--outputdir", jobOutputDir,
         stlPath,
