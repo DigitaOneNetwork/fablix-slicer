@@ -24,7 +24,79 @@ const ORCA_BIN = process.env.ORCA_CLI_PATH;
 const PROFILES_BASE = process.env.ORCA_PROFILES_PATH;
 const BUILD_COMMIT = process.env.SLICER_BUILD_COMMIT ?? "unknown";
 const BUILD_DATE = process.env.SLICER_BUILD_DATE ?? "unknown";
-const BUILD_VOLUME_MM = { x: 256, y: 256, z: 256 };
+
+const PRINTERS = {
+  h2s: {
+    id: "h2s",
+    name: "Bambu Lab H2S",
+    slicerName: "Bambu Lab H2S 0.4 nozzle",
+    buildVolumeMm: { x: 340, y: 320, z: 340 },
+    machineProfile: "Bambu Lab H2S 0.4 nozzle",
+    processProfiles: {
+      precise: "0.12mm High Quality @BBL H2S",
+      fine: "0.20mm Standard @BBL H2S",
+      standard: "0.20mm Standard @BBL H2S",
+      rough: "0.24mm Standard @BBL H2S",
+    },
+    filamentProfiles: {
+      pla: "Bambu PLA Basic @BBL H2S",
+      petg: "Bambu PETG Basic @BBL H2S",
+      abs: "Bambu ABS @BBL H2S",
+      tpu: "Bambu TPU 95A @BBL H2S",
+      "pla-cf": "Bambu PLA-CF @BBL H2S",
+      "petg-cf": "Generic PETG-CF @BBL H2S",
+    },
+  },
+  x1c: {
+    id: "x1c",
+    name: "Bambu Lab X1C",
+    slicerName: "Bambu Lab X1 Carbon 0.4 nozzle",
+    buildVolumeMm: { x: 256, y: 256, z: 256 },
+    machineProfile: "Bambu Lab X1 Carbon 0.4 nozzle",
+    processProfiles: {
+      precise: "0.20mm Standard @BBL X1C",
+      fine: "0.20mm Standard @BBL X1C",
+      standard: "0.20mm Standard @BBL X1C",
+      rough: "0.28mm Extra Draft @BBL X1C",
+    },
+    filamentProfiles: {
+      pla: "Bambu PLA Basic @BBL X1C",
+      petg: "Bambu PETG Basic @BBL X1C",
+      abs: "Bambu ABS @BBL X1C",
+      tpu: "Bambu TPU 95A @BBL X1C",
+      "pla-cf": "Bambu PLA-CF @BBL X1C",
+      "petg-cf": "Generic PETG-CF @BBL X1C",
+    },
+  },
+};
+
+const DEFAULT_PRINTER_ID = PRINTERS[process.env.DEFAULT_PRINTER_ID?.toLowerCase()]?.id ?? "h2s";
+
+function normalizePrinterId(value) {
+  const raw = `${value ?? DEFAULT_PRINTER_ID}`.trim().toLowerCase();
+  const compact = raw.replace(/[^a-z0-9]/g, "");
+
+  if (compact === "h2s" || compact === "bambulabh2s") return "h2s";
+  if (
+    compact === "x1c" ||
+    compact === "bblx1c" ||
+    compact === "bambulabx1c" ||
+    compact === "bambulabx1carbon"
+  ) {
+    return "x1c";
+  }
+
+  return raw;
+}
+
+function getPrinterConfig(value) {
+  const printerId = normalizePrinterId(value);
+  const printer = PRINTERS[printerId];
+  if (!printer) {
+    throw new Error(`Unbekannter Drucker '${value}'. Verfuegbar: ${Object.keys(PRINTERS).join(", ")}.`);
+  }
+  return printer;
+}
 
 // Liest LOCALE_ARCHIVE aus Env, oder sucht mit kurzem Timeout
 function findLocaleArchive() {
@@ -43,23 +115,13 @@ const LOCALE_ARCHIVE = findLocaleArchive();
 console.log(`[SLICER] LOCALE_ARCHIVE: ${LOCALE_ARCHIVE ?? "nicht gefunden"}`);
 
 // Mappt API-Material auf Bambu-Filament-Profilname
-function getFilamentProfile(material) {
-  const map = {
-    pla:    "Bambu PLA Basic @BBL X1C",
-    petg:   "Bambu PETG Basic @BBL X1C",
-    abs:    "Bambu ABS @BBL X1C",
-    tpu:    "Bambu TPU 95A @BBL X1C",
-    "pla-cf": "Bambu PLA-CF @BBL X1C",
-    "petg-cf": "Generic PETG-CF @BBL X1C",
-  };
-  return map[material?.toLowerCase()] ?? "Bambu PLA Basic @BBL X1C";
+function getFilamentProfile(material, printer) {
+  return printer.filamentProfiles[material?.toLowerCase()] ?? printer.filamentProfiles.pla;
 }
 
 // Mappt API-Qualität auf Prozess-Profilname
-function getProcessProfile(quality) {
-  return quality === "fine"
-    ? "0.20mm Standard @BBL X1C"
-    : "0.28mm Extra Draft @BBL X1C";
+function getProcessProfile(quality, printer) {
+  return printer.processProfiles[quality?.toLowerCase()] ?? printer.processProfiles.standard;
 }
 
 function createEmptyBounds() {
@@ -96,20 +158,22 @@ function formatMm(value) {
   return Number.isFinite(value) ? `${value.toFixed(2)}mm` : "unbekannt";
 }
 
-function assertStlFitsBuildVolume(bounds) {
+function assertStlFitsBuildVolume(bounds, printer) {
   const size = getBoundsSize(bounds);
-  if (size.x > BUILD_VOLUME_MM.x || size.y > BUILD_VOLUME_MM.y || size.z > BUILD_VOLUME_MM.z) {
+  const buildVolume = printer.buildVolumeMm;
+  if (size.x > buildVolume.x || size.y > buildVolume.y || size.z > buildVolume.z) {
     throw new Error(
-      `Modell passt nicht in den Bauraum des Bambu X1C (${BUILD_VOLUME_MM.x} x ${BUILD_VOLUME_MM.y} x ${BUILD_VOLUME_MM.z}mm). ` +
+      `Modell passt nicht in den Bauraum des ${printer.name} (${buildVolume.x} x ${buildVolume.y} x ${buildVolume.z}mm). ` +
         `Modellgroesse: ${formatMm(size.x)} x ${formatMm(size.y)} x ${formatMm(size.z)}.`
     );
   }
 }
 
-function getPlacementOffset(bounds) {
+function getPlacementOffset(bounds, printer) {
+  const buildVolume = printer.buildVolumeMm;
   return {
-    x: BUILD_VOLUME_MM.x / 2 - (bounds.minX + bounds.maxX) / 2,
-    y: BUILD_VOLUME_MM.y / 2 - (bounds.minY + bounds.maxY) / 2,
+    x: buildVolume.x / 2 - (bounds.minX + bounds.maxX) / 2,
+    y: buildVolume.y / 2 - (bounds.minY + bounds.maxY) / 2,
     z: -bounds.minZ,
   };
 }
@@ -121,7 +185,7 @@ function isBinaryStl(buffer) {
   return triangleCount > 0 && expectedLength <= buffer.length;
 }
 
-function normalizeBinaryStl(buffer) {
+function normalizeBinaryStl(buffer, printer) {
   const triangleCount = buffer.readUInt32LE(80);
   const bounds = createEmptyBounds();
 
@@ -139,9 +203,9 @@ function normalizeBinaryStl(buffer) {
   }
 
   if (!bounds.vertices) throw new Error("STL-Datei enthaelt keine Dreiecke.");
-  assertStlFitsBuildVolume(bounds);
+  assertStlFitsBuildVolume(bounds, printer);
 
-  const offset = getPlacementOffset(bounds);
+  const offset = getPlacementOffset(bounds, printer);
   for (let i = 0; i < triangleCount; i += 1) {
     const triangleOffset = 84 + i * 50;
     for (let vertexIndex = 0; vertexIndex < 3; vertexIndex += 1) {
@@ -155,7 +219,7 @@ function normalizeBinaryStl(buffer) {
   return { bounds, offset };
 }
 
-function normalizeAsciiStl(text) {
+function normalizeAsciiStl(text, printer) {
   const vertexPattern = /(vertex\s+)([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)/g;
   const bounds = createEmptyBounds();
 
@@ -164,9 +228,9 @@ function normalizeAsciiStl(text) {
   }
 
   if (!bounds.vertices) throw new Error("STL-Datei enthaelt keine lesbaren Vertex-Daten.");
-  assertStlFitsBuildVolume(bounds);
+  assertStlFitsBuildVolume(bounds, printer);
 
-  const offset = getPlacementOffset(bounds);
+  const offset = getPlacementOffset(bounds, printer);
   const normalizedText = text.replace(vertexPattern, (_match, prefix, x, y, z) => {
     return `${prefix}${Number.parseFloat(x) + offset.x} ${Number.parseFloat(y) + offset.y} ${Number.parseFloat(z) + offset.z}`;
   });
@@ -174,18 +238,18 @@ function normalizeAsciiStl(text) {
   return { text: normalizedText, bounds, offset };
 }
 
-async function normalizeStlPlacement(stlPath) {
+async function normalizeStlPlacement(stlPath, printer) {
   const buffer = await fs.readFile(stlPath);
 
   if (isBinaryStl(buffer)) {
     const normalizedBuffer = Buffer.from(buffer);
-    const normalized = normalizeBinaryStl(normalizedBuffer);
+    const normalized = normalizeBinaryStl(normalizedBuffer, printer);
     await fs.writeFile(stlPath, normalizedBuffer);
     return { ...normalized, format: "binary" };
   }
 
   const text = buffer.toString("utf8");
-  const normalized = normalizeAsciiStl(text);
+  const normalized = normalizeAsciiStl(text, printer);
   await fs.writeFile(stlPath, normalized.text, "utf8");
   return { bounds: normalized.bounds, offset: normalized.offset, format: "ascii" };
 }
@@ -368,6 +432,21 @@ async function readGeneratedGcode(jobOutputDir) {
   );
 }
 
+function getProfilePath(kind, profileName) {
+  return path.join(PROFILES_BASE, kind, `${profileName}.json`);
+}
+
+async function ensureProfileExists(profilePath, label) {
+  try {
+    await fs.access(profilePath);
+  } catch {
+    throw new Error(
+      `${label} fehlt im OrcaSlicer-Image: ${profilePath}. ` +
+        "Bitte Image neu bauen, damit die H2S-Profile installiert werden."
+    );
+  }
+}
+
 app.post(["/api/slice", "/slice"], upload.single("stl"), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: "Keine STL-Datei hochgeladen." });
@@ -377,19 +456,26 @@ app.post(["/api/slice", "/slice"], upload.single("stl"), async (req, res) => {
     return res.status(500).json({ error: "ORCA_CLI_PATH ist nicht konfiguriert." });
   }
 
+  if (!PROFILES_BASE) {
+    return res.status(500).json({ error: "ORCA_PROFILES_PATH ist nicht konfiguriert." });
+  }
+
   // Datei mit .stl Extension umbenennen, damit OrcaSlicer das Format erkennt
   const stlPath = path.resolve(req.file.path) + ".stl";
   await fs.rename(req.file.path, stlPath);
   const material = req.body.material ?? "pla";
   const quality  = req.body.quality  ?? "standard";
+  const requestedPrinter = req.body.printer;
   const jobId    = `job_${Date.now()}`;
   const jobOutputDir = path.join(OUTPUT_DIR, jobId);
 
   try {
+    const printer = getPrinterConfig(requestedPrinter);
+
     await fs.mkdir(UPLOADS_DIR, { recursive: true });
     await fs.mkdir(jobOutputDir, { recursive: true });
 
-    const placement = await normalizeStlPlacement(stlPath);
+    const placement = await normalizeStlPlacement(stlPath, printer);
     const size = getBoundsSize(placement.bounds);
     console.log(
       `[SLICER] STL normalisiert (${placement.format}): ` +
@@ -397,11 +483,15 @@ app.post(["/api/slice", "/slice"], upload.single("stl"), async (req, res) => {
         `Offset X${placement.offset.x.toFixed(2)} Y${placement.offset.y.toFixed(2)} Z${placement.offset.z.toFixed(2)}`
     );
 
-    const machineProfPath = path.join(PROFILES_BASE, "machine", "Bambu Lab X1 Carbon 0.4 nozzle.json");
-    const processProfName = getProcessProfile(quality);
-    const processProfPath = path.join(PROFILES_BASE, "process", `${processProfName}.json`);
-    const filamentProfName = getFilamentProfile(material);
-    const filamentProfPath = path.join(PROFILES_BASE, "filament", `${filamentProfName}.json`);
+    const machineProfPath = getProfilePath("machine", printer.machineProfile);
+    const processProfName = getProcessProfile(quality, printer);
+    const processProfPath = getProfilePath("process", processProfName);
+    const filamentProfName = getFilamentProfile(material, printer);
+    const filamentProfPath = getProfilePath("filament", filamentProfName);
+
+    await ensureProfileExists(machineProfPath, `Druckerprofil '${printer.machineProfile}'`);
+    await ensureProfileExists(processProfPath, `Prozessprofil '${processProfName}'`);
+    await ensureProfileExists(filamentProfPath, `Filamentprofil '${filamentProfName}'`);
 
     // Patched Prozess-Profil: liest Originaldatei und setzt use_relative_e_distances=0
     // (verhindert OrcaSlicer exit code -51 durch fdm_machine_common Basis-Profil)
@@ -411,7 +501,7 @@ app.post(["/api/slice", "/slice"], upload.single("stl"), async (req, res) => {
     await fs.writeFile(patchedProcPath, JSON.stringify(procRaw));
 
     console.log(`[SLICER] Job ${jobId}: ${req.file.originalname}`);
-    console.log(`[SLICER] Drucker:   Bambu Lab X1 Carbon 0.4 nozzle`);
+    console.log(`[SLICER] Drucker:   ${printer.slicerName}`);
     console.log(`[SLICER] Prozess:   ${processProfName}`);
     console.log(`[SLICER] Filament:  ${filamentProfName}`);
 
@@ -458,6 +548,11 @@ app.post(["/api/slice", "/slice"], upload.single("stl"), async (req, res) => {
       success: true,
       filamentGrams,
       printTimeSeconds,
+      printer: {
+        id: printer.id,
+        name: printer.name,
+        buildVolumeMm: printer.buildVolumeMm,
+      },
     });
 
   } catch (error) {
@@ -475,10 +570,19 @@ app.post(["/api/slice", "/slice"], upload.single("stl"), async (req, res) => {
 });
 
 app.get(["/", "/health", "/version"], (_req, res) => {
+  const availablePrinters = Object.values(PRINTERS).map((printer) => ({
+    id: printer.id,
+    name: printer.name,
+    slicerName: printer.slicerName,
+    buildVolumeMm: printer.buildVolumeMm,
+  }));
+
   res.json({
     status: "ok",
     method: "orca-slicer-cli",
     orca: ORCA_BIN ?? "nicht konfiguriert",
+    defaultPrinter: DEFAULT_PRINTER_ID,
+    availablePrinters,
     build: {
       commit: BUILD_COMMIT,
       date: BUILD_DATE,
