@@ -24,6 +24,10 @@ const ORCA_BIN = process.env.ORCA_CLI_PATH;
 const PROFILES_BASE = process.env.ORCA_PROFILES_PATH;
 const BUILD_COMMIT = process.env.SLICER_BUILD_COMMIT ?? "unknown";
 const BUILD_DATE = process.env.SLICER_BUILD_DATE ?? "unknown";
+const H2S_COMPATIBILITY_PATCHES = [
+  "h2s-estimate-start-gcode",
+  "h2s-estimate-end-gcode",
+];
 
 const PRINTERS = {
   h2s: {
@@ -436,43 +440,47 @@ function getProfilePath(kind, profileName) {
   return path.join(PROFILES_BASE, kind, `${profileName}.json`);
 }
 
-function removeUnsupportedH2sGcodeBlock(gcode) {
-  const lines = gcode.split("\n");
-  const patched = [];
-  let skipping = false;
-  let ifDepth = 0;
+const H2S_ESTIMATE_START_GCODE = [
+  "; Fablix H2S estimate compatibility start gcode for Orca CLI 2.3.1",
+  "M17",
+  "M400",
+  "G90",
+  "M83",
+  "M220 S100",
+  "M221 S100",
+  "M73.2 R1.0",
+  "G29.1 Z{+0.0}",
+  "M104 S140",
+  "M140 S[bed_temperature_initial_layer_single]",
+  "M190 S[bed_temperature_initial_layer_single]",
+  "M109 S{nozzle_temperature_initial_layer[initial_no_support_extruder]}",
+  "G92 E0",
+].join("\n");
 
-  for (const line of lines) {
-    if (!skipping && line.includes("{if (min_vitrification_temperature <= 50)}")) {
-      skipping = true;
-      ifDepth = 1;
-      patched.push("    ; H2S chamber autocooling block removed for Orca CLI 2.3.1 compatibility");
-      patched.push("    M142 P1 R30 S40 T45 U0.3 V0.5 W0.8 O45 ; set chamber autocooling");
-      continue;
-    }
+const H2S_ESTIMATE_END_GCODE = [
+  "; Fablix H2S estimate compatibility end gcode for Orca CLI 2.3.1",
+  "M400",
+  "G92 E0",
+  "G1 E-0.8 F1800",
+  "M104 S0",
+  "M140 S0",
+  "M106 S0",
+  "M220 S100",
+  "M201.2 K1.0",
+  "M73.2 R1.0",
+  "M400",
+  "M18",
+].join("\n");
 
-    if (skipping) {
-      if (line.includes("{if ")) ifDepth += 1;
-      if (line.includes("{endif}")) ifDepth -= 1;
-      if (ifDepth <= 0) skipping = false;
-      continue;
-    }
-
-    patched.push(line);
-  }
-
-  return patched.join("\n");
-}
-
-async function createPatchedMachineProfile(machineProfPath, printer, jobOutputDir) {
+async function createPatchedMachineProfile(machineProfPath, printer, material, jobOutputDir) {
   if (printer.id !== "h2s") return machineProfPath;
 
   const patchedMachinePath = path.join(jobOutputDir, "machine_patched.json");
   const machineRaw = JSON.parse(await fs.readFile(machineProfPath, "utf8"));
+  machineRaw.machine_start_gcode = H2S_ESTIMATE_START_GCODE;
+  machineRaw.machine_end_gcode = H2S_ESTIMATE_END_GCODE;
 
-  if (typeof machineRaw.machine_start_gcode === "string") {
-    machineRaw.machine_start_gcode = removeUnsupportedH2sGcodeBlock(machineRaw.machine_start_gcode);
-  }
+  console.log(`[SLICER] H2S estimate compatibility profile aktiv (Material: ${material ?? "unbekannt"})`);
 
   await fs.writeFile(patchedMachinePath, JSON.stringify(machineRaw));
   return patchedMachinePath;
@@ -534,7 +542,7 @@ app.post(["/api/slice", "/slice"], upload.single("stl"), async (req, res) => {
     await ensureProfileExists(machineProfPath, `Druckerprofil '${printer.machineProfile}'`);
     await ensureProfileExists(processProfPath, `Prozessprofil '${processProfName}'`);
     await ensureProfileExists(filamentProfPath, `Filamentprofil '${filamentProfName}'`);
-    const patchedMachineProfPath = await createPatchedMachineProfile(machineProfPath, printer, jobOutputDir);
+    const patchedMachineProfPath = await createPatchedMachineProfile(machineProfPath, printer, material, jobOutputDir);
 
     // Patched Prozess-Profil: liest Originaldatei und setzt use_relative_e_distances=0
     // (verhindert OrcaSlicer exit code -51 durch fdm_machine_common Basis-Profil)
@@ -626,6 +634,7 @@ app.get(["/", "/health", "/version"], (_req, res) => {
     orca: ORCA_BIN ?? "nicht konfiguriert",
     defaultPrinter: DEFAULT_PRINTER_ID,
     availablePrinters,
+    compatibilityPatches: H2S_COMPATIBILITY_PATCHES,
     build: {
       commit: BUILD_COMMIT,
       date: BUILD_DATE,
